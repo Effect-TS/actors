@@ -56,7 +56,7 @@ export function transactional<S, F1 extends AM.AnyMessage, Ev = never>(
                 (
                   _: AM.ExtractTagged<F1, Tag>
                 ) => T.Effect<
-                  infer R,
+                  infer R & T.DefaultEnv,
                   Throwable,
                   AM.ResponseOf<AM.ExtractTagged<F1, Tag>>
                 >
@@ -153,6 +153,10 @@ export class Transactional<R, S, Ev, F1 extends AM.AnyMessage> extends AbstractS
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const self = this
 
+    if (events.length === 0) {
+      return T.unit
+    }
+
     return T.gen(function* (_) {
       const { emit } = yield* _(Persistence)
       const encode = yield* _(self.encodeEvent)
@@ -199,8 +203,8 @@ export class Transactional<R, S, Ev, F1 extends AM.AnyMessage> extends AbstractS
                 T.bind("state", (_) => REF.makeRef(_.s[0])),
                 T.let("fa", () => msg[0]),
                 T.let("promise", () => msg[1]),
-                T.let("receiver", (_) => {
-                  return this.receive(
+                T.let("receiver", (_) =>
+                  this.receive(
                     {
                       event: {
                         emit: (ev) => REF.update_(_.events, Chunk.append(ev))
@@ -211,7 +215,7 @@ export class Transactional<R, S, Ev, F1 extends AM.AnyMessage> extends AbstractS
                   )[_.fa._tag as AM.TagsOf<F1>](
                     _.fa as AM.ExtractTagged<F1, AM.TagsOf<F1>>
                   )
-                }),
+                ),
                 T.let(
                   "completer",
                   (_) => (a: AM.ResponseOf<F1>) =>

@@ -28,19 +28,20 @@ type Message = AM.TypeOf<typeof Message>
 const handler = AC.stateful(
   Message,
   S.number
-)((state, ctx) =>
-  matchTag({
-    Reset: (_) => _.return(0),
-    Increase: (_) => _.return(state + 1),
-    Get: (_) => _.return(state, state),
-    GetAndReset: (_) =>
-      pipe(
-        ctx.self,
-        T.chain((self) => self.tell(new Reset())),
-        T.zipRight(_.return(state, state))
-      )
-  })
-)
+)(({ state }, ctx) => ({
+  Reset: (_) => state.set(0),
+  Increase: (_) =>
+    pipe(
+      state.get,
+      T.chain((s) => state.set(s + 1))
+    ),
+  Get: (_) => state.get,
+  GetAndReset: (_) =>
+    pipe(
+      state.get,
+      T.tap(() => T.chain_(ctx.self, (self) => self.tell(new Reset())))
+    )
+}))
 
 class Increased extends S.Model<Increased>()(
   S.props({
@@ -178,15 +179,13 @@ describe("Actor", () => {
       AC.stateful(
         TickMessage,
         S.number
-      )((_, ctx) =>
-        matchTag({
-          Tick: (_) =>
-            pipe(
-              REF.updateAndGet_(ref, (s) => s + 1),
-              T.chain((s) => (s < 10 ? T.fail("fail") : _.return(0)))
-            )
-        })
-      )
+      )((_, ctx) => ({
+        Tick: (_) =>
+          pipe(
+            REF.updateAndGet_(ref, (s) => s + 1),
+            T.chain((s) => (s < 10 ? T.fail("fail") : T.succeed(0)))
+          )
+      }))
 
     const program = pipe(
       T.do,

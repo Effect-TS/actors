@@ -1,9 +1,10 @@
-import { pipe } from "@effect-ts/core"
+import { pipe as Act } from "@effect-ts/core"
 import * as CH from "@effect-ts/core/Collections/Immutable/Chunk"
 import * as T from "@effect-ts/core/Effect"
 import * as P from "@effect-ts/core/Effect/Promise"
 import * as Q from "@effect-ts/core/Effect/Queue"
 import * as REF from "@effect-ts/core/Effect/Ref"
+import type { UnionToIntersection } from "@effect-ts/core/Utils"
 import type * as SCH from "@effect-ts/schema"
 import type { HasClock } from "@effect-ts/system/Clock"
 import { tuple } from "@effect-ts/system/Function"
@@ -42,7 +43,7 @@ export class Actor<F1 extends AM.AnyMessage> {
   }
 
   ask<A extends F1>(fa: A) {
-    return pipe(
+    return Act(
       P.make<Throwable, AM.ResponseOf<A>>(),
       T.tap((promise) => Q.offer_(this.queue, tuple(fa, promise))),
       T.chain(P.await)
@@ -54,14 +55,14 @@ export class Actor<F1 extends AM.AnyMessage> {
    * so there is no guarantee that it actually gets consumed by the actor.
    */
   tell(fa: F1) {
-    return pipe(
+    return Act(
       P.make<Throwable, any>(),
       T.chain((promise) => Q.offer_(this.queue, tuple(fa, promise))),
       T.zipRight(T.unit)
     )
   }
 
-  readonly stop = pipe(
+  readonly stop = Act(
     Q.takeAll(this.queue),
     T.tap(() => Q.shutdown(this.queue)),
     T.tap(this.optOutActorSystem),
@@ -102,14 +103,46 @@ export function stateful<S, F1 extends AM.AnyMessage>(
   messages: AM.MessageRegistry<F1>,
   stateSchema: SCH.Standard<S>
 ) {
-  return <R>(
+  return <
+    X extends {
+      [Tag in AM.TagsOf<F1>]: (
+        _: AM.ExtractTagged<F1, Tag>
+      ) => T.Effect<any, any, AM.ResponseOf<AM.ExtractTagged<F1, Tag>>>
+    }
+  >(
     receive: (
-      state: S,
+      dsl: {
+        state: {
+          get: T.UIO<S>
+          set: (s: S) => T.UIO<void>
+        }
+      },
       context: AS.Context<F1>
-    ) => (
-      msg: StatefulEnvelope<S, F1>
-    ) => T.Effect<R, Throwable, StatefulResponse<S, F1>>
-  ) => new Stateful<R, S, F1>(messages, stateSchema, receive)
+    ) => X
+  ) =>
+    new Stateful<
+      UnionToIntersection<
+        {
+          [Tag in AM.TagsOf<F1>]: Tag extends keyof X
+            ? [X[Tag]] extends [
+                (
+                  _: AM.ExtractTagged<F1, Tag>
+                ) => T.Effect<
+                  infer R,
+                  Throwable,
+                  AM.ResponseOf<AM.ExtractTagged<F1, Tag>>
+                >
+              ]
+              ? unknown extends R
+                ? never
+                : R
+              : never
+            : never
+        }[AM.TagsOf<F1>]
+      >,
+      S,
+      F1
+    >(messages, stateSchema, receive)
 }
 
 export class Stateful<R, S, F1 extends AM.AnyMessage> extends AbstractStateful<
@@ -121,11 +154,18 @@ export class Stateful<R, S, F1 extends AM.AnyMessage> extends AbstractStateful<
     readonly messages: AM.MessageRegistry<F1>,
     readonly stateSchema: SCH.Standard<S>,
     readonly receive: (
-      state: S,
+      dsl: {
+        state: {
+          get: T.UIO<S>
+          set: (s: S) => T.UIO<void>
+        }
+      },
       context: AS.Context<F1>
-    ) => (
-      msg: StatefulEnvelope<S, F1>
-    ) => T.Effect<R, Throwable, StatefulResponse<S, F1>>
+    ) => {
+      [Tag in AM.TagsOf<F1>]: (
+        _: AM.ExtractTagged<F1, Tag>
+      ) => T.Effect<R, Throwable, AM.ResponseOf<AM.ExtractTagged<F1, Tag>>>
+    }
   ) {
     super()
   }
@@ -142,36 +182,39 @@ export class Stateful<R, S, F1 extends AM.AnyMessage> extends AbstractStateful<
       msg: PendingMessage<F1>,
       state: REF.Ref<S>
     ): T.RIO<R & HasClock, void> => {
-      return pipe(
+      return Act(
         T.do,
         T.bind("s", () => REF.get(state)),
         T.let("fa", () => msg[0]),
         T.let("promise", () => msg[1]),
+        T.bind("state", (_) => REF.makeRef(_.s)),
         T.let("receiver", (_) =>
           this.receive(
-            _.s,
+            {
+              state: { get: REF.get(_.state), set: (s) => REF.set_(_.state, s) }
+            },
             context
-          )({
-            _tag: _.fa._tag,
-            payload: _.fa,
-            return: (s: S, r: AM.ResponseOf<F1>) => T.succeed(tuple(s, r))
-          } as any)
+          )[_.fa._tag as AM.TagsOf<F1>](_.fa as AM.ExtractTagged<F1, AM.TagsOf<F1>>)
         ),
         T.let(
           "completer",
-          (_) =>
-            ([s, a]: readonly [S, AM.ResponseOf<F1>]) =>
-              pipe(
-                REF.set_(state, s),
-                T.zipRight(P.succeed_(_.promise, a)),
-                T.as(T.unit)
+          (_) => (a: AM.ResponseOf<F1>) =>
+            Act(
+              REF.get(_.state),
+              T.chain((s) =>
+                Act(
+                  REF.set_(state, s),
+                  T.zipRight(P.succeed_(_.promise, a)),
+                  T.as(T.unit)
+                )
               )
+            )
         ),
         T.chain((_) =>
           T.foldM_(
             _.receiver,
             (e) =>
-              pipe(
+              Act(
                 supervisor.supervise(_.receiver, e),
                 T.foldM((__) => P.fail_(_.promise, e), _.completer)
               ),
@@ -182,12 +225,12 @@ export class Stateful<R, S, F1 extends AM.AnyMessage> extends AbstractStateful<
     }
 
     return (initial) =>
-      pipe(
+      Act(
         T.do,
         T.bind("state", () => REF.makeRef(initial)),
         T.bind("queue", () => Q.makeBounded<PendingMessage<F1>>(mailboxSize)),
         T.tap((_) =>
-          pipe(
+          Act(
             Q.take(_.queue),
             T.chain((t) => process(t, _.state)),
             T.forever,
@@ -224,10 +267,10 @@ export class ActorProxy<R, S, F1 extends AM.AnyMessage, E> extends AbstractState
     mailboxSize: number = this.defaultMailboxSize
   ): (initial: S) => T.RIO<R & HasClock, Actor<F1>> {
     return (initial) => {
-      return pipe(
+      return Act(
         T.do,
         T.bind("queue", () => Q.makeBounded<PendingMessage<F1>>(mailboxSize)),
-        T.bind("fiber", (_) => pipe(this.process(_.queue, context, initial), T.fork)),
+        T.bind("fiber", (_) => Act(this.process(_.queue, context, initial), T.fork)),
         T.map((_) => new Actor(this.messages, _.queue, optOutActorSystem))
       )
     }

@@ -406,11 +406,11 @@ export const makeCluster = M.gen(function* (_) {
   const watchLeader = (scope: string) =>
     pipe(
       leaderPath(scope),
-      T.chain((o) =>
-        O.isNone(o)
+      T.chain((o) => {
+        return O.isNone(o)
           ? T.die("cannot find a leader")
           : cli.waitDelete(`${clusterDir}/elections/${scope}/${o.value}`)
-      )
+      })
     )
 
   return {
